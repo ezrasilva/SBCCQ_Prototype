@@ -133,6 +133,26 @@ class Network():
         """
         nx.draw(self._graph, with_labels=True)
 
+    def _initialize_channel_metadata(self, edge):
+        """Initialize physical and QKD metadata for a link resource."""
+        prob_cfg = self.config.probability
+        edge_data = self._graph.edges[edge]
+
+        edge_data['prob_on_demand_epr_create'] = random.uniform(prob_cfg.epr_create_min, prob_cfg.epr_create_max)
+        edge_data['prob_replay_epr_create'] = random.uniform(prob_cfg.epr_create_min, prob_cfg.epr_create_max)
+        edge_data['eprs'] = list()
+
+        # ETSI GS QKD inspired metadata for each link as a managed QKD resource.
+        edge_data['qkd_state'] = 'active'
+        edge_data['qkd_supported_protocols'] = ['BB84']
+        edge_data['qkd_key_buffer'] = list()
+        edge_data['qkd_bits_available'] = 0
+        edge_data['qkd_key_rate_bps'] = 0.0
+        edge_data['qkd_total_generated_bits'] = 0
+        edge_data['qkd_total_sessions'] = 0
+        edge_data['qkd_successful_sessions'] = 0
+        edge_data['qkd_min_bits_threshold'] = 128
+
     def add_host(self, host: Host):
         """
         Add a host to the network hosts dictionary and the host_id to the network graph.
@@ -156,6 +176,7 @@ class Network():
         for connection in host.connections:
             if not self._graph.has_edge(host.host_id, connection):
                 self._graph.add_edge(host.host_id, connection)
+                self._initialize_channel_metadata((host.host_id, connection))
                 Logger.get_instance().debug(f'Connections of {host.host_id} added to network graph.')
 
     def get_host(self, host_id: int) -> Host:
@@ -263,12 +284,47 @@ class Network():
         """
         Initialize network channels.
         """
-        prob_cfg = self.config.probability
         for edge in self.edges:
-            self._graph.edges[edge]['prob_on_demand_epr_create'] = random.uniform(prob_cfg.epr_create_min, prob_cfg.epr_create_max)
-            self._graph.edges[edge]['prob_replay_epr_create'] = random.uniform(prob_cfg.epr_create_min, prob_cfg.epr_create_max)
-            self._graph.edges[edge]['eprs'] = list()
+            self._initialize_channel_metadata(edge)
         self.logger.debug("Channels initialized")
+
+    def get_qkd_link_state(self, alice_id: int, bob_id: int) -> dict:
+        """Return QKD resource state for a direct link."""
+        edge = tuple(sorted((alice_id, bob_id)))
+        if not self._graph.has_edge(*edge):
+            raise KeyError(f'QKD link {edge} not found.')
+
+        data = self._graph.edges[edge]
+        return {
+            'link': edge,
+            'state': data.get('qkd_state', 'inactive'),
+            'supported_protocols': data.get('qkd_supported_protocols', []),
+            'bits_available': data.get('qkd_bits_available', 0),
+            'key_rate_bps': data.get('qkd_key_rate_bps', 0.0),
+            'total_generated_bits': data.get('qkd_total_generated_bits', 0),
+            'total_sessions': data.get('qkd_total_sessions', 0),
+            'successful_sessions': data.get('qkd_successful_sessions', 0),
+            'min_bits_threshold': data.get('qkd_min_bits_threshold', 0),
+        }
+
+    def request_key_from_buffer(self, alice_id: int, bob_id: int, num_bits: int) -> list:
+        """Consume key bits from a link buffer and return them."""
+        if num_bits <= 0:
+            return []
+
+        edge = tuple(sorted((alice_id, bob_id)))
+        if not self._graph.has_edge(*edge):
+            raise KeyError(f'QKD link {edge} not found.')
+
+        data = self._graph.edges[edge]
+        buffer_bits = data.get('qkd_key_buffer', [])
+        if len(buffer_bits) < num_bits:
+            raise ValueError(f'Insufficient key material in buffer for link {edge}. requested={num_bits} available={len(buffer_bits)}')
+
+        key_slice = buffer_bits[:num_bits]
+        del buffer_bits[:num_bits]
+        data['qkd_bits_available'] = len(buffer_bits)
+        return key_slice
 
     def start_eprs(self, num_eprs: int = None):
         """
