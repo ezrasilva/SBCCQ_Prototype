@@ -5,6 +5,7 @@ from ..runtime import Clock
 from ..config import SimulationConfig
 from .host import Host
 from ..control.network_context import NetworkContext
+from ..control.controller import Controller
 from ..layers import *
 import random
 import os
@@ -33,6 +34,8 @@ class Network():
         self._network = NetworkLayer(self._context, self._physical)
         self._transport = TransportLayer(self._context, self._network, self._physical)
         self._application = ApplicationLayer(self._context, self._transport)
+        self._controller = Controller(self)
+        self._application.set_controller(self._controller)
         # Register decoherence as tick callback
         self.clock.on_tick(self._decoherence_on_tick)
 
@@ -127,6 +130,11 @@ class Network():
         """
         return self._application
 
+    @property
+    def controller(self):
+        """Network controller responsible for QKD resource policies."""
+        return self._controller
+
     def draw(self):
         """
         Draw the network.
@@ -152,6 +160,13 @@ class Network():
         edge_data['qkd_total_sessions'] = 0
         edge_data['qkd_successful_sessions'] = 0
         edge_data['qkd_min_bits_threshold'] = 128
+        edge_data['qkd_total_consumed_bits'] = 0
+        edge_data['qkd_total_requested_bits'] = 0
+        edge_data['qkd_served_requests'] = 0
+        edge_data['qkd_failed_requests'] = 0
+        edge_data['qkd_denied_requests'] = 0
+        edge_data['qkd_replenishment_events'] = 0
+        edge_data['qkd_policy_last_action'] = None
 
     def add_host(self, host: Host):
         """
@@ -301,30 +316,52 @@ class Network():
             'supported_protocols': data.get('qkd_supported_protocols', []),
             'bits_available': data.get('qkd_bits_available', 0),
             'key_rate_bps': data.get('qkd_key_rate_bps', 0.0),
+            'min_bits_threshold': data.get('qkd_min_bits_threshold', 0),
             'total_generated_bits': data.get('qkd_total_generated_bits', 0),
+            'total_consumed_bits': data.get('qkd_total_consumed_bits', 0),
+            'total_requested_bits': data.get('qkd_total_requested_bits', 0),
+            'served_requests': data.get('qkd_served_requests', 0),
+            'failed_requests': data.get('qkd_failed_requests', 0),
+            'denied_requests': data.get('qkd_denied_requests', 0),
+            'replenishment_events': data.get('qkd_replenishment_events', 0),
+            'policy_last_action': data.get('qkd_policy_last_action', None),
             'total_sessions': data.get('qkd_total_sessions', 0),
             'successful_sessions': data.get('qkd_successful_sessions', 0),
-            'min_bits_threshold': data.get('qkd_min_bits_threshold', 0),
         }
 
-    def request_key_from_buffer(self, alice_id: int, bob_id: int, num_bits: int) -> list:
-        """Consume key bits from a link buffer and return them."""
+    def _update_consumption_metrics(self, edge_data: dict, num_bits: int, served: bool) -> None:
+        """Update QKD accounting after a key consumption request."""
+        edge_data['qkd_total_requested_bits'] = int(edge_data.get('qkd_total_requested_bits', 0)) + int(num_bits)
+
+        if served:
+            edge_data['qkd_total_consumed_bits'] = int(edge_data.get('qkd_total_consumed_bits', 0)) + int(num_bits)
+            edge_data['qkd_served_requests'] = int(edge_data.get('qkd_served_requests', 0)) + 1
+            edge_data['qkd_policy_last_action'] = 'serve'
+        else:
+            edge_data['qkd_failed_requests'] = int(edge_data.get('qkd_failed_requests', 0)) + 1
+            edge_data['qkd_policy_last_action'] = 'insufficient_buffer'
+
+    def request_key_from_buffer(self, alice_id: int, bob_id: int, num_bits: int) -> bool:
+        """Consume key bits from the link buffer, updating QKD request metrics."""
         if num_bits <= 0:
-            return []
+            return False
 
         edge = tuple(sorted((alice_id, bob_id)))
         if not self._graph.has_edge(*edge):
             raise KeyError(f'QKD link {edge} not found.')
 
-        data = self._graph.edges[edge]
-        buffer_bits = data.get('qkd_key_buffer', [])
-        if len(buffer_bits) < num_bits:
-            raise ValueError(f'Insufficient key material in buffer for link {edge}. requested={num_bits} available={len(buffer_bits)}')
+        edge_data = self._graph.edges[edge]
+        buffer_bits = edge_data.get('qkd_key_buffer', [])
+        available = len(buffer_bits)
 
-        key_slice = buffer_bits[:num_bits]
-        del buffer_bits[:num_bits]
-        data['qkd_bits_available'] = len(buffer_bits)
-        return key_slice
+        if available >= num_bits:
+            del buffer_bits[:num_bits]
+            edge_data['qkd_bits_available'] = len(buffer_bits)
+            self._update_consumption_metrics(edge_data, num_bits, served=True)
+            return True
+
+        self._update_consumption_metrics(edge_data, num_bits, served=False)
+        return False
 
     def start_eprs(self, num_eprs: int = None):
         """
@@ -403,7 +440,7 @@ class Network():
 
         )
         return total_qubits
-
+    
     def get_metrics(self, metrics_requested=None, output_type="csv", file_name="metrics_output.csv"):
             """
             Retrieve network metrics as requested and export, print, or store them.

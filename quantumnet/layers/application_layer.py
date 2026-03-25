@@ -18,6 +18,7 @@ class ApplicationLayer:
         self.used_qubits = 0
         self._qkd_sessions = []
         self._next_session_id = 1
+        self._controller = None
 
     def __str__(self):
         return 'Application Layer'
@@ -65,9 +66,22 @@ class ApplicationLayer:
         if app_name == "QKD_BB84" or app_name == "BB84":
             alice_id, bob_id, num_bits = args
             return self.qkd_bb84_protocol(alice_id, bob_id, num_bits)
+        if app_name == "QKD_REQUEST_KEY":
+            alice_id, bob_id, num_bits = args
+            return self.request_qkd_key(alice_id, bob_id, num_bits)
         else:
             self.logger.log(f"Application not executed or not found.")
             return False
+
+    def set_controller(self, controller):
+        """Attach a controller used to manage QKD key requests."""
+        self._controller = controller
+
+    def request_qkd_key(self, alice_id, bob_id, num_bits):
+        """Request key bits via control policy (Application -> Controller -> Network)."""
+        if self._controller is None:
+            raise RuntimeError('Controller not configured for ApplicationLayer.')
+        return self._controller.handle_key_request(alice_id, bob_id, num_bits)
 
 
     def prepare_e91_qubits(self, key, bases):
@@ -268,7 +282,7 @@ class ApplicationLayer:
         self._context.clock.emit('bb84_measurement', num_qubits=len(results))
         return results
 
-    def qkd_bb84_protocol(self, alice_id, bob_id, num_bits, qber_threshold=0.15, sample_ratio=0.2, max_rounds=160):
+    def qkd_bb84_protocol(self, alice_id, bob_id, num_bits, qber_threshold=0.15, sample_ratio=0.2, max_rounds=160, max_failed_rounds=48):
         """
         Implement BB84 protocol for Quantum Key Distribution (QKD).
 
@@ -279,6 +293,7 @@ class ApplicationLayer:
             qber_threshold (float): Abort threshold for estimated QBER.
             sample_ratio (float): Fraction of sifted bits used for QBER estimation.
             max_rounds (int): Maximum protocol rounds.
+            max_failed_rounds (int): Maximum failed rounds (transport/high-QBER/invalid).
 
         Returns:
             dict|None: Dictionary with final key and protocol data, or None on failure.
@@ -290,6 +305,10 @@ class ApplicationLayer:
         final_key = []
         rounds = 0
         qber_history = []
+        failed_rounds = 0
+
+        if max_failed_rounds is None:
+            max_failed_rounds = max_rounds
 
         while len(final_key) < num_bits and rounds < max_rounds:
             rounds += 1
@@ -311,14 +330,20 @@ class ApplicationLayer:
             if not success:
                 self.logger.log('BB84 transport failed in this round; retrying in next round.')
                 self._context.clock.emit('bb84_round_failed', reason='transport_failed', round=rounds)
+                failed_rounds += 1
                 self._context.clock.tick()
+                if failed_rounds >= max_failed_rounds:
+                    break
                 continue
 
             received_qubits = bob.memory[bob_initial_memory_size:]
             if len(received_qubits) < num_qubits:
                 self.logger.log('BB84 round invalid: Bob received fewer qubits than expected; retrying.')
                 self._context.clock.emit('bb84_round_failed', reason='insufficient_received_qubits', round=rounds)
+                failed_rounds += 1
                 self._context.clock.tick()
+                if failed_rounds >= max_failed_rounds:
+                    break
                 continue
 
             bases_bob = [random.choice([0, 1]) for _ in range(num_qubits)]
@@ -330,7 +355,10 @@ class ApplicationLayer:
 
             if not sifted_alice:
                 self.logger.log('BB84 round produced no sifted bits; retrying next round.')
+                failed_rounds += 1
                 self._context.clock.tick()
+                if failed_rounds >= max_failed_rounds:
+                    break
                 continue
 
             if len(sifted_alice) == 1:
@@ -347,11 +375,42 @@ class ApplicationLayer:
             if qber_estimate > qber_threshold:
                 self.logger.log(f'BB84 high QBER in round {rounds}: {qber_estimate}; discarding this round and retrying.')
                 self._context.clock.emit('bb84_round_failed', reason='high_qber', qber=qber_estimate, round=rounds)
+                failed_rounds += 1
                 self._context.clock.tick()
+                if failed_rounds >= max_failed_rounds:
+                    break
                 continue
 
             key_positions = [i for i in range(len(sifted_alice)) if i not in sample_positions]
-            candidate_bits = [sifted_alice[i] for i in key_positions if sifted_alice[i] == sifted_bob[i]]
+            if not key_positions:
+                failed_rounds += 1
+                self._context.clock.emit('bb84_round_failed', reason='no_key_positions', round=rounds)
+                self._context.clock.tick()
+                if failed_rounds >= max_failed_rounds:
+                    break
+                continue
+
+            # Keep non-sampled bits as candidate key material.
+            # In practical BB84, remaining errors are corrected later by reconciliation.
+            residual_errors = sum(1 for i in key_positions if sifted_alice[i] != sifted_bob[i])
+            residual_qber = residual_errors / len(key_positions)
+            if residual_qber > qber_threshold:
+                self.logger.log(
+                    f'BB84 residual QBER too high in round {rounds}: {residual_qber}; discarding round.'
+                )
+                self._context.clock.emit(
+                    'bb84_round_failed',
+                    reason='residual_high_qber',
+                    qber=residual_qber,
+                    round=rounds,
+                )
+                failed_rounds += 1
+                self._context.clock.tick()
+                if failed_rounds >= max_failed_rounds:
+                    break
+                continue
+
+            candidate_bits = [sifted_alice[i] for i in key_positions]
 
             for bit in candidate_bits:
                 if len(final_key) < num_bits:
@@ -364,12 +423,14 @@ class ApplicationLayer:
                 sample_size=sample_size,
                 qber=qber_estimate,
                 accumulated_key=len(final_key),
+                failed_rounds=failed_rounds,
             )
             self._context.clock.tick()
 
         if len(final_key) < num_bits:
-            self.logger.log('BB84 failed: max rounds reached before obtaining final key size.')
-            self._context.clock.emit('bb84_aborted', reason='max_rounds_reached', round=rounds)
+            abort_reason = 'max_rounds_reached' if rounds >= max_rounds else 'max_failed_rounds_reached'
+            self.logger.log(f'BB84 failed: {abort_reason} before obtaining final key size.')
+            self._context.clock.emit('bb84_aborted', reason=abort_reason, round=rounds, failed_rounds=failed_rounds)
             link_data = self._get_qkd_link_data(alice_id, bob_id)
             if link_data is not None:
                 link_data['qkd_total_sessions'] += 1
@@ -383,6 +444,8 @@ class ApplicationLayer:
                 'requested_bits': num_bits,
                 'status': 'failed',
                 'rounds': rounds,
+                'failed_rounds': failed_rounds,
+                'abort_reason': abort_reason,
             })
             return None
 
@@ -417,6 +480,7 @@ class ApplicationLayer:
             'requested_bits': num_bits,
             'status': 'completed',
             'rounds': rounds,
+            'failed_rounds': failed_rounds,
             'avg_qber': avg_qber,
         })
 
@@ -425,6 +489,7 @@ class ApplicationLayer:
             'qber_history': qber_history,
             'avg_qber': avg_qber,
             'rounds': rounds,
+            'failed_rounds': failed_rounds,
             'session_id': session_record['session_id'],
             'buffered_bits': buffered_bits,
         }

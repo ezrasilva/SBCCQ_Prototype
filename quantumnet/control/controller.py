@@ -2,9 +2,11 @@ import networkx as nx
 from ..utils import Logger
 
 class Controller():
-    def __init__(self, network):
+    def __init__(self, network, policy: str = "threshold"):
         self.network = network
         self.hosts = None
+        self.policy = policy
+        self.control_log = []
         self.logger = Logger.get_instance()
 
     def _normalize_link(self, alice_id: int, bob_id: int) -> tuple:
@@ -76,6 +78,160 @@ class Controller():
 
         self.logger.log(f"Alice {route[0]} and Bob {route[-1]} informed.")
 
+    def set_policy(self, policy: str) -> None:
+        valid_policies = {"threshold", "on_demand", "hybrid"}
+        if policy not in valid_policies:
+            raise ValueError(f"Política invalida: {policy}")
+        self.policy = policy
+
+    def handle_key_request(self, alice_id: int, bob_id: int, num_bits: int) -> bool:
+        if self.policy == "threshold":
+            return self._apply_threshold_policy(alice_id, bob_id, num_bits)
+
+        if self.policy == "on_demand":
+            return self._apply_on_demand_policy(alice_id, bob_id, num_bits)
+
+        if self.policy == "hybrid":
+            return self._apply_hybrid_policy(alice_id, bob_id, num_bits)
+
+        raise ValueError(f"Política não suportada: {self.policy}")
+    
+    def collect_link_state(self, alice_id: int, bob_id: int) -> dict:
+        return self.network.get_qkd_link_state(alice_id, bob_id)
+    
+    def _log_control_event(self, alice_id: int, bob_id: int, event: str, requested_bits: int = 0, available_before: int = 0, available_after: int = 0, extra: dict | None = None) -> None:
+        record = {
+            "link": (alice_id, bob_id),
+            "policy": self.policy,
+            "event": event,
+            "requested_bits": requested_bits,
+            "available_before": available_before,
+            "available_after": available_after,
+        }
+
+        if extra:
+            record.update(extra)
+
+        self.control_log.append(record)
+
+    def replenish_link(self, alice_id: int, bob_id: int, target_bits: int) -> int:
+        """Run BB84 to replenish a link buffer and return the net added bits."""
+        before = int(self.collect_link_state(alice_id, bob_id).get('bits_available', 0))
+        self.start_bb84_session(alice_id, bob_id, target_bits)
+        after = int(self.collect_link_state(alice_id, bob_id).get('bits_available', 0))
+        added_bits = max(0, after - before)
+
+        # Count replenishment only when the buffer actually increased.
+        if added_bits > 0:
+            edge_data = self._get_link_data(alice_id, bob_id)
+            edge_data['qkd_replenishment_events'] = int(edge_data.get('qkd_replenishment_events', 0)) + 1
+            edge_data['qkd_last_replenishment_amount'] = added_bits
+
+            self._log_control_event(
+                alice_id,
+                bob_id,
+                event="replenish",
+                available_before=before,
+                available_after=after,
+                extra={"target_bits": int(target_bits)},
+            )
+
+        return added_bits
+
+    def deny_key_request(self, alice_id: int, bob_id: int, num_bits: int, reason: str) -> bool:
+        """Register denial metrics and return False."""
+        edge_data = self._get_link_data(alice_id, bob_id)
+        edge_data['qkd_denied_requests'] = int(edge_data.get('qkd_denied_requests', 0)) + 1
+        edge_data['qkd_policy_last_action'] = f"deny:{reason}"
+
+        state = self.collect_link_state(alice_id, bob_id)
+        available = int(state.get('bits_available', 0))
+
+        self._log_control_event(
+            alice_id,
+            bob_id,
+            event="deny",
+            requested_bits=int(num_bits),
+            available_before=available,
+            available_after=available,
+            extra={"reason": reason},
+        )
+
+        return False
+
+    def serve_key_request(self, alice_id: int, bob_id: int, num_bits: int) -> bool:
+        """Consume bits from the link buffer and register control events."""
+        before = int(self.collect_link_state(alice_id, bob_id).get('bits_available', 0))
+        served = bool(self.network.request_key_from_buffer(alice_id, bob_id, num_bits))
+        after = int(self.collect_link_state(alice_id, bob_id).get('bits_available', 0))
+
+        if served:
+            self._log_control_event(
+                alice_id,
+                bob_id,
+                event="serve",
+                requested_bits=int(num_bits),
+                available_before=before,
+                available_after=after,
+            )
+
+        return served
+
+    def _apply_threshold_policy(self, alice_id: int, bob_id: int, num_bits: int) -> bool:
+        state = self.collect_link_state(alice_id, bob_id)
+        available = int(state.get('bits_available', 0))
+        threshold = int(state.get('min_bits_threshold', 0))
+
+        if available >= num_bits:
+            return self.serve_key_request(alice_id, bob_id, num_bits)
+
+        if available < threshold:
+            replenish_target = max(threshold, num_bits)
+            self.replenish_link(alice_id, bob_id, replenish_target)
+
+        state_after = self.collect_link_state(alice_id, bob_id)
+        if int(state_after.get('bits_available', 0)) >= num_bits:
+            return self.serve_key_request(alice_id, bob_id, num_bits)
+
+        return self.deny_key_request(alice_id, bob_id, num_bits, "threshold_policy_insufficient_bits")
+
+    def _apply_on_demand_policy(self, alice_id: int, bob_id: int, num_bits: int) -> bool:
+        state = self.collect_link_state(alice_id, bob_id)
+        available = int(state.get('bits_available', 0))
+
+        if available >= num_bits:
+            return self.serve_key_request(alice_id, bob_id, num_bits)
+
+        missing = num_bits - available
+        self.replenish_link(alice_id, bob_id, missing)
+
+        state_after = self.collect_link_state(alice_id, bob_id)
+        if int(state_after.get('bits_available', 0)) >= num_bits:
+            return self.serve_key_request(alice_id, bob_id, num_bits)
+
+        return self.deny_key_request(alice_id, bob_id, num_bits, "on_demand_insufficient_bits")
+
+    def _apply_hybrid_policy(self, alice_id: int, bob_id: int, num_bits: int) -> bool:
+        state = self.collect_link_state(alice_id, bob_id)
+        available = int(state.get('bits_available', 0))
+        threshold = int(state.get('min_bits_threshold', 0))
+
+        if available < threshold:
+            self.replenish_link(alice_id, bob_id, threshold)
+
+        state_mid = self.collect_link_state(alice_id, bob_id)
+        available_mid = int(state_mid.get('bits_available', 0))
+
+        if available_mid < num_bits:
+            missing = num_bits - available_mid
+            self.replenish_link(alice_id, bob_id, missing)
+
+        state_after = self.collect_link_state(alice_id, bob_id)
+        if int(state_after.get('bits_available', 0)) >= num_bits:
+            return self.serve_key_request(alice_id, bob_id, num_bits)
+
+        return self.deny_key_request(alice_id, bob_id, num_bits, "hybrid_insufficient_bits")
+
     # QKD Discovery Operations
     def get_qkd_nodes(self):
         """List nodes capable of participating in QKD sessions."""
@@ -122,11 +278,12 @@ class Controller():
         return result
 
     def request_key(self, alice_id: int, bob_id: int, num_bits: int):
-        """Request key material from a link buffer."""
-        key_bits = self.network.request_key_from_buffer(alice_id, bob_id, num_bits)
+        """Request key material through the configured control policy."""
+        served = self.handle_key_request(alice_id, bob_id, num_bits)
         edge = self._normalize_link(alice_id, bob_id)
-        self.logger.log(f'Controller served {len(key_bits)} bits from QKD link {edge}.')
-        return key_bits
+        action = 'served' if served else 'denied'
+        self.logger.log(f'Controller {action} {num_bits} requested bits on QKD link {edge}.')
+        return served
 
     # QKD Management Operations
     def set_minimum_stock(self, alice_id: int, bob_id: int, min_bits: int):
@@ -153,14 +310,17 @@ class Controller():
 
             needed = threshold - available
             replenish_bits = max(default_replenish_bits, needed)
-            result = self.start_bb84_session(link[0], link[1], replenish_bits)
+            added_bits = self.replenish_link(link[0], link[1], replenish_bits)
+            available_after = int(self.collect_link_state(link[0], link[1]).get('bits_available', 0))
 
             actions.append({
                 'link': link,
                 'available_before': available,
+                'available_after': available_after,
                 'threshold': threshold,
                 'requested_replenish_bits': replenish_bits,
-                'status': 'started' if result is not None else 'failed',
+                'added_bits': added_bits,
+                'status': 'replenished' if added_bits > 0 else 'failed',
             })
 
         return actions
