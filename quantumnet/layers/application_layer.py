@@ -16,6 +16,7 @@ class ApplicationLayer:
         self._transport_layer = transport_layer
         self.logger = Logger.get_instance()
         self.used_qubits = 0
+        self._qubit_counter = 0
         self._qkd_sessions = []
         self._next_session_id = 1
         self._controller = None
@@ -209,7 +210,8 @@ class ApplicationLayer:
         """
         qubits = []
         for bit, base in zip(key_bits, bases):
-            qubit = Qubit(qubit_id=random.randint(0, 1000000))
+            self._qubit_counter += 1
+            qubit = Qubit(qubit_id=self._qubit_counter)
 
             if base == 0:
                 if bit == 1:
@@ -348,6 +350,17 @@ class ApplicationLayer:
 
             bases_bob = [random.choice([0, 1]) for _ in range(num_qubits)]
             results_bob = self.decode_bb84_results(key_bits, bases_alice, bases_bob, received_qubits)
+
+            # Discard measured qubits from Bob memory to prevent host.memory growth and
+            # avoid decoherence processing on stale qubits in Network._decoherence_on_tick.
+            del bob.memory[bob_initial_memory_size:]
+
+            # Clean up per-qubit creation timeslots for the qubits we just discarded.
+            # The context holds a reference to Network.qubit_timeslots.
+            qubit_timeslots = getattr(self._context, '_qubit_timeslots', None)
+            if isinstance(qubit_timeslots, dict):
+                for qubit in received_qubits:
+                    qubit_timeslots.pop(getattr(qubit, 'qubit_id', None), None)
 
             sifted_indices = [i for i in range(num_qubits) if bases_alice[i] == bases_bob[i]]
             sifted_alice = [key_bits[i] for i in sifted_indices]
