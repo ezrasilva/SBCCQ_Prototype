@@ -346,9 +346,9 @@ def run_experiment_3(max_workers: int = 10, trials: int = 30) -> pd.DataFrame:
 
 
 def main() -> None:
-    run_experiment_1(max_workers=10, trials=1)
-    run_experiment_2(max_workers=10, trials=1)
-    run_experiment_3(max_workers=10, trials=1)
+    run_experiment_1(max_workers=10, trials=2)
+    run_experiment_2(max_workers=10, trials=2)
+    run_experiment_3(max_workers=10, trials=2)
 
 
 if __name__ == "__main__":

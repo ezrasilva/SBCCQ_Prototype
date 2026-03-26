@@ -185,9 +185,12 @@ class Controller():
         if available >= num_bits:
             return self.serve_key_request(alice_id, bob_id, num_bits)
 
-        if available < threshold:
-            replenish_target = max(threshold, num_bits)
-            self.replenish_link(alice_id, bob_id, replenish_target)
+        # Replenish toward the higher target (threshold or request size),
+        # but request only the missing amount instead of the absolute target.
+        target_level = max(threshold, num_bits)
+        missing_bits = max(0, target_level - available)
+        if missing_bits > 0:
+            self.replenish_link(alice_id, bob_id, missing_bits)
 
         state_after = self.collect_link_state(alice_id, bob_id)
         if int(state_after.get('bits_available', 0)) >= num_bits:
@@ -217,7 +220,9 @@ class Controller():
         threshold = int(state.get('min_bits_threshold', 0))
 
         if available < threshold:
-            self.replenish_link(alice_id, bob_id, threshold)
+            missing_to_threshold = threshold - available
+            if missing_to_threshold > 0:
+                self.replenish_link(alice_id, bob_id, missing_to_threshold)
 
         state_mid = self.collect_link_state(alice_id, bob_id)
         available_mid = int(state_mid.get('bits_available', 0))
