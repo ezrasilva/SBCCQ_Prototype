@@ -1,0 +1,124 @@
+Quero estruturar os experimentos do artigo em três blocos principais, avaliando as políticas Threshold, On-Demand e Hybrid em um simulador de gerenciamento de chaves QKD. O foco do trabalho é comparar o comportamento dessas políticas em termos de taxa de atendimento, falhas/negações, uso do buffer e eventos de reposição de chaves.
+
+Experimento 1 — Comparação básica entre políticas
+
+Objetivo:
+Comparar diretamente as três políticas em um cenário controlado e estável, para obter uma visão inicial do comportamento de cada uma.
+
+Como deve funcionar:
+
+Usar a mesma configuração base do sistema para todas as políticas.
+Manter fixos:
+taxa de geração de chaves
+capacidade do buffer
+tamanho das requisições
+duração da simulação
+número total de requisições ou padrão de chegada
+Rodar várias execuções independentes por política, idealmente 30 repetições, com sementes diferentes, para permitir cálculo de média e desvio padrão.
+
+O que medir:
+
+taxa de atendimento de requisições
+taxa de falha ou negação
+ocupação média do buffer
+número de eventos de reposição
+eficiência no uso das chaves, se essa métrica existir no código
+
+O que esse experimento deve mostrar:
+
+qual política performa melhor em uma condição “normal”
+diferenças básicas entre abordagem proativa, reativa e híbrida
+uma baseline para comparar com os cenários mais críticos
+Experimento 2 — Avaliação sob diferentes condições de carga, incluindo burst
+
+Objetivo:
+Avaliar como as políticas se comportam quando a pressão da demanda aumenta e quando o tráfego deixa de ser uniforme, incluindo situações de sobrecarga e rajadas.
+
+Como deve funcionar:
+Esse experimento deve testar três perfis de carga dentro do mesmo bloco experimental:
+
+2.1 Carga moderada
+taxa de chegada de requisições próxima da taxa de geração de chaves
+representa operação equilibrada do sistema
+2.2 Sobrecarga
+taxa de chegada de requisições maior que a taxa de geração
+representa situação de escassez persistente de chaves
+2.3 Burst (rajadas)
+a carga média pode até ser parecida com a moderada ou intermediária, mas as requisições devem chegar concentradas em certos períodos
+exemplo: janelas curtas com muitas requisições seguidas, alternadas com períodos mais calmos
+o objetivo é simular picos repentinos de demanda
+
+Importante:
+
+usar a mesma topologia e os mesmos parâmetros estruturais, variando principalmente o padrão de chegada das requisições
+para o burst, não basta só aumentar o número total de requisições; é preciso mudar a distribuição temporal delas
+
+O que medir:
+
+taxa de atendimento em cada perfil de carga
+taxa de falha/negação
+eventos de reposição
+ocupação média do buffer
+variabilidade dos resultados entre execuções
+
+O que esse experimento deve mostrar:
+
+como as políticas degradam quando a carga cresce
+quais políticas são mais robustas sob sobrecarga
+quais políticas reagem melhor a picos repentinos
+trade-off entre disponibilidade e custo de reposição
+
+Observação importante:
+Esse experimento é o mais importante do artigo, porque conecta diretamente as políticas a cenários críticos reais.
+
+Experimento 3 — Análise de sensibilidade do limiar
+
+Objetivo:
+Investigar como o valor do parâmetro de limiar influencia o desempenho das políticas que dependem dele, principalmente Threshold e Hybrid.
+
+Como deve funcionar:
+
+selecionar vários valores de limiar para o buffer
+por exemplo: limiar baixo, médio e alto, ou uma faixa maior de valores
+rodar os experimentos para cada valor de limiar
+comparar como a mudança desse parâmetro altera o comportamento do sistema
+
+Sugestão:
+
+manter o cenário de carga fixo durante esse experimento, preferencialmente um cenário representativo, como carga moderada ou sobrecarga
+aplicar essa análise apenas às políticas que realmente usam limiar
+
+O que medir:
+
+taxa de atendimento
+taxa de falha/negação
+número de eventos de reposição
+ocupação média do buffer
+
+O que esse experimento deve mostrar:
+
+se limiares muito baixos deixam o sistema vulnerável à escassez
+se limiares muito altos causam reposição excessiva e uso ineficiente de recursos
+se existe uma faixa de limiar mais adequada para equilibrar disponibilidade e eficiência
+
+O valor científico desse experimento:
+
+mostra que o desempenho não depende apenas da política escolhida
+também depende da parametrização da política
+isso reforça que políticas aparentemente robustas podem se tornar ineficientes se mal configuradas
+Requisitos gerais para todos os experimentos
+
+Quero que todos os experimentos:
+
+sejam executados com 30 repetições independentes
+usem sementes fixas e reproduzíveis
+salvem os resultados em tabela/CSV
+retornem médias e desvios padrão
+gerem gráficos comparativos por política
+
+As métricas principais do artigo devem ser:
+
+taxa de atendimento
+taxa de falha ou negação
+utilização média do buffer
+número de eventos de reposição

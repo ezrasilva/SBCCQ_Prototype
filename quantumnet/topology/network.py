@@ -155,8 +155,11 @@ class Network():
         edge_data['qkd_supported_protocols'] = ['BB84']
         edge_data['qkd_key_buffer'] = list()
         edge_data['qkd_bits_available'] = 0
+        # Optional cap for the key buffer (in bits). None means unbounded (legacy behaviour).
+        edge_data['qkd_max_buffer_bits'] = None
         edge_data['qkd_key_rate_bps'] = 0.0
         edge_data['qkd_total_generated_bits'] = 0
+        edge_data['qkd_total_dropped_bits'] = 0
         edge_data['qkd_total_sessions'] = 0
         edge_data['qkd_successful_sessions'] = 0
         edge_data['qkd_min_bits_threshold'] = 128
@@ -315,9 +318,11 @@ class Network():
             'state': data.get('qkd_state', 'inactive'),
             'supported_protocols': data.get('qkd_supported_protocols', []),
             'bits_available': data.get('qkd_bits_available', 0),
+            'max_buffer_bits': data.get('qkd_max_buffer_bits', None),
             'key_rate_bps': data.get('qkd_key_rate_bps', 0.0),
             'min_bits_threshold': data.get('qkd_min_bits_threshold', 0),
             'total_generated_bits': data.get('qkd_total_generated_bits', 0),
+            'total_dropped_bits': data.get('qkd_total_dropped_bits', 0),
             'total_consumed_bits': data.get('qkd_total_consumed_bits', 0),
             'total_requested_bits': data.get('qkd_total_requested_bits', 0),
             'served_requests': data.get('qkd_served_requests', 0),

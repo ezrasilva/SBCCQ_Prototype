@@ -459,10 +459,30 @@ class ApplicationLayer:
         link_data = self._get_qkd_link_data(alice_id, bob_id)
         buffered_bits = 0
         if link_data is not None:
-            link_data['qkd_key_buffer'].extend(final_key)
-            buffered_bits = len(link_data['qkd_key_buffer'])
-            link_data['qkd_bits_available'] = buffered_bits
+            # Total generated bits counts what BB84 produced, even if the buffer is capped.
             link_data['qkd_total_generated_bits'] += len(final_key)
+
+            buffer_bits = link_data.get('qkd_key_buffer', [])
+            max_buffer_bits = link_data.get('qkd_max_buffer_bits', None)
+
+            dropped_bits = 0
+            if max_buffer_bits is None:
+                buffer_bits.extend(final_key)
+            else:
+                cap = max(0, int(max_buffer_bits))
+                free = max(0, cap - len(buffer_bits))
+                if free <= 0:
+                    dropped_bits = len(final_key)
+                else:
+                    buffer_bits.extend(final_key[:free])
+                    dropped_bits = max(0, len(final_key) - free)
+
+            if dropped_bits:
+                link_data['qkd_total_dropped_bits'] = int(link_data.get('qkd_total_dropped_bits', 0)) + int(dropped_bits)
+
+            link_data['qkd_key_buffer'] = buffer_bits
+            buffered_bits = len(buffer_bits)
+            link_data['qkd_bits_available'] = buffered_bits
             link_data['qkd_total_sessions'] += 1
             link_data['qkd_successful_sessions'] += 1
             elapsed_slots = max(1, self._context.clock.now - session_start)
